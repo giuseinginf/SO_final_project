@@ -65,6 +65,10 @@ int fs_format(const char *fs_filename, size_t size) {
     // Mark the first block of the root directory as used in the FAT
     g_fat[g_fcbs[0].first_block_index] = FAT_EOF;
 
+    //initializing entries to 0
+    directory_entry_t* root_entries = (directory_entry_t*)bm_get_block_address(g_fcbs[0].first_block_index);
+    memset(root_entries, 0, BLOCK_SIZE); // Initialize root directory entries to zero
+
     //update the bitmap
     g_bitmap[g_fcbs[0].first_block_index / 8] |= (1 << (g_fcbs[0].first_block_index % 8));
     return 0;
@@ -162,16 +166,127 @@ int fs_ls() {
     
     printf("Contents of root directory:\n");
     for(size_t i = 0; i < MAX_DIR_ENTRIES_PER_BLOCK; ++i) {
-        if (entries[i].fcb_index != 0 && entries[i].name[0] != '\0') {
-            fcb_t* fcb = &g_fcbs[entries[i].fcb_index];
-            const char* type = (fcb->type == FILE_TYPE_DIRECTORY) ? "Directory" : "File";
-            printf("Name: %s, Type: %s, Size: %u bytes\n", entries[i].name, type, fcb->size);
-        }
+    directory_entry_t* entry = &entries[i];
+    if(entry->fcb_index >= MAX_FCB_COUNT){
+        fprintf(stderr, "Invalid FCB index in directory entry\n");
+        continue; // Skip invalid entries
+    }    
+    fcb_t *fcb = &g_fcbs[entry->fcb_index];
+    if(fcb->type != FILE_TYPE_DIRECTORY && fcb->type != FILE_TYPE_REGULAR) {
+        fprintf(stderr, "Invalid FCB type for entry '%s'\n", entry->name);
+        continue; // Skip invalid entries
+    }
+    const char *type_str = (fcb->type == FILE_TYPE_DIRECTORY) ? "Directory" : "File";
+    printf("Name: %s, Type: %s, Size: %u bytes\n", entry->name, type_str, fcb->size);
     }
     return 0;
 }
 
+int fs_touch(const char *name) {
+    if (strlen(name) >= MAX_FILENAME_LEN) {
+        fprintf(stderr, "File name too long\n");
+        return -1; // File name exceeds maximum length
+    }
+    // Find a free FCB
+    int free_fcb = -1;
+    for (int i = 1; i < MAX_FCB_COUNT; ++i) {
+        if (g_fcbs[i].type == FILE_TYPE_UNUSED) {
+            free_fcb = i;
+            break;
+        }
+    }
+if(free_fcb == -1){
+    fprintf(stderr, "No free FCB available\n");
+    return -2; // No free FCB available
+}
+
+//no need for block for empty file, just allocate a block
+uint32_t data_block = allocate_free_block();
+if (data_block == FAT_EOF) {
+    fprintf(stderr, "No free blocks available\n");
+    return -3; // No free blocks available
+}
+// Initialize the new file FCB
+fcb_t *fcb = &g_fcbs[free_fcb];
+fcb->type = FILE_TYPE_REGULAR;
+fcb->size = 0; // Initially, the file size is 0
+fcb->first_block_index = data_block;
+//add to the root directory
+uint32_t root_block = g_fcbs[0].first_block_index;
+directory_entry_t* entries = (directory_entry_t*)bm_get_block_address(root_block);
+
+for(size_t i = 0; i < MAX_DIR_ENTRIES_PER_BLOCK; ++i) {
+    if (entries[i].fcb_index == 0 && entries[i].name[0] == '\0') { // Find an empty entry
+        strncpy(entries[i].name, name, MAX_FILENAME_LEN -1);
+        entries[i].name[MAX_FILENAME_LEN - 1] = '\0'; // Ensure null termination
+        entries[i].fcb_index = free_fcb; // Link to the new FCB
+        
+        fcb->size += sizeof(directory_entry_t); // Update size of the directory
+        return 0; // Success
+    }
+}
+fprintf(stderr, "Root directory is full, cannot add new file\n");
+return -4; // Root directory is full
+}
+
+int fs_append(const char *filename, const char *text) {
+    uint32_t root_block = g_fcbs[0].first_block_index;
+    directory_entry_t* entries = (directory_entry_t*)bm_get_block_address(root_block);
+    int found = -1;
+    // Find the file in the root directory
+    for(size_t i = 0; i < MAX_DIR_ENTRIES_PER_BLOCK; ++i) {
+        if(strncmp(entries[i].name, filename, MAX_FILENAME_LEN) == 0) {
+            found = entries[i].fcb_index;
+            break;
+        }
+    }
+    if(found == -1) {
+        fprintf(stderr, "File '%s' not found\n", filename);
+        return -1; // File not found
+    }
+    fcb_t *fcb = &g_fcbs[found];
+    if(fcb->type != FILE_TYPE_REGULAR) {
+        fprintf(stderr, "Cannot append to a directory\n");
+        return -2; // Not a regular file
+    }
+    size_t text_length = strlen(text);
+    size_t bytes_written = 0;
+    uint32_t current_block = fcb->first_block_index;
+    size_t file_size = fcb->size;
+    // Find the last block of the file
+    while (g_fat[current_block] != FAT_EOF){
+        current_block = g_fat[current_block];
+    }
+    //calculate offset in the last block
+    size_t offset = file_size % BLOCK_SIZE;
+    char* block_data = (char*)bm_get_block_address(current_block);
+    //write in the last block as much as there is space
+    while (bytes_written < text_length) {
+        size_t to_write = BLOCK_SIZE - offset; // Space left in the current block
+        if(to_write > text_length - bytes_written) {
+            to_write = text_length - bytes_written; // Write only the remaining text
+        }
+        memcpy(block_data + offset, text + bytes_written, to_write);
+        bytes_written += to_write;
+        fcb->size += to_write; // Update file size
+        
+        //if we're not done writing, allocate a new block
+        if (bytes_written < text_length) {
+            uint32_t new_block = allocate_free_block();
+            if (new_block == FAT_EOF) {
+                fprintf(stderr, "No free blocks available for appending\n");
+                return -3; // No free blocks available
+            }
+            g_fat[current_block] = new_block; // Link the last block to the new block
+            g_fat[new_block] = FAT_EOF; // Mark the new block as end of file
+            current_block = new_block; // Move to the new block
+            block_data = (char*)bm_get_block_address(current_block); // Get the address of the new block
+            offset = 0; // Reset offset for the new block
+        } 
+    }
+    return 0; // Success
+}
+
 void fs_close() {
     bm_close();
-    
-}
+ }

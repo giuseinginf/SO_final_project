@@ -23,6 +23,9 @@ int main() {
     else
         printf("Failed to create directory 'test_dir'.\n");
 
+    fs_touch("file1.txt"); // Create a file
+    fs_append("file1.txt", "Hello"); // Append text to the file
+    fs_append("file1.txt", " World!"); // Append more text
     fs_ls(); // List the contents of the filesystem
     fs_close();
     printf("Filesystem operations completed successfully.\n");
