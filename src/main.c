@@ -14,10 +14,16 @@ int main() {
             printf("Failed to format filesystem.\n");
             return 1;
         }
-    }else{
-        printf("Filesystem initialized successfully.\n");
+        fs_init(FS_FILENAME); // Reinitialize after formatting
     }
 
+    printf("Creating test_dir directory...\n");
+    if(fs_mkdir("test_dir") == 0)
+        printf("Directory 'test_dir' created successfully.\n");
+    else
+        printf("Failed to create directory 'test_dir'.\n");
+
+    fs_ls(); // List the contents of the filesystem
     fs_close();
     printf("Filesystem operations completed successfully.\n");
     return 0;

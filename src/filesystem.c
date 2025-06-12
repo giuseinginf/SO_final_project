@@ -47,7 +47,15 @@ int fs_format(const char *fs_filename, size_t size) {
     
     //FCB ARRAY
     g_fcbs = (fcb_t*)bm_get_block_address(g_superblock->fat_start_block + fat_blocks);
+    printf("[Debug fs_format]: g_fcbs start at block: %u\n", g_superblock->fat_start_block + fat_blocks);
     memset(g_fcbs, 0, MAX_FCB_COUNT*sizeof(fcb_t)); // Initialize FCBs to zero
+    for(int i = 0; i < 10; ++i){
+        printf("[Debug fs_format]: FCB %d: Type: %d, Size: %u, First Block Index: %u\n", i, g_fcbs[i].type, g_fcbs[i].size, g_fcbs[i].first_block_index);
+    }
+
+    for(int i = 0; i < MAX_FCB_COUNT; ++i) {
+        g_fcbs[i].type = FILE_TYPE_UNUSED; // Mark all FCBs as unused
+    }
 
     // Set the root directory FCB
     g_fcbs[0].type = FILE_TYPE_DIRECTORY;
@@ -82,6 +90,84 @@ int fs_init(const char *fs_filename) {
     uint32_t fat_blocks = (g_superblock->data_start_block - g_superblock->fat_start_block);
     g_fcbs = (fcb_t*)bm_get_block_address(g_superblock->fat_start_block + fat_blocks);
     
+    return 0;
+}
+
+static uint32_t allocate_free_block() {
+    for (uint32_t i =g_superblock->data_start_block; i < g_superblock->total_blocks; i++) {
+        uint8_t byte = g_bitmap[i / 8];
+        if(!(byte & (1 << (i % 8)))) {
+            // Block is free
+            g_bitmap[i / 8] |= (1 << (i % 8)); // Mark block as used in bitmap
+            g_fat[i] = FAT_EOF; // Mark block as end of file in FAT
+            g_superblock->free_blocks--;
+            return i; // Return the index of the allocated block
+        }
+    }
+    return FAT_EOF; // No free block found
+}
+
+int fs_mkdir(const char *name) {
+    if (strlen(name) >= MAX_FILENAME_LEN) {
+        fprintf(stderr, "Directory name too long\n");
+        return -1; // Directory name exceeds maximum length
+    }
+
+    // Find a free FCB
+    int free_fcb = -1;
+    for (int i = 1; i < MAX_FCB_COUNT; ++i) {
+        if (g_fcbs[i].type != FILE_TYPE_DIRECTORY && g_fcbs[i].type != FILE_TYPE_REGULAR) {
+            free_fcb = i;
+            break;
+        }
+    }
+    if (free_fcb == -1) {
+        fprintf(stderr, "No free FCB available\n");
+        return -2; // No free FCB available
+    }
+
+    uint32_t new_block = allocate_free_block();
+    if (new_block == FAT_EOF) {
+        fprintf(stderr, "No free blocks available\n");
+        return -3; // No free blocks available
+    }
+    // Initialize the new directory FCB
+    fcb_t *fcb = &g_fcbs[free_fcb];
+    fcb->type = FILE_TYPE_DIRECTORY;
+    fcb->size = 0;
+    fcb->first_block_index = new_block;
+    
+    //add to the root directory
+    uint32_t root_block = g_fcbs[0].first_block_index;
+    directory_entry_t* entries = (directory_entry_t*)bm_get_block_address(root_block);
+
+    for(size_t i = 0; i < MAX_DIR_ENTRIES_PER_BLOCK; ++i) {
+        if (entries[i].fcb_index == 0 && entries[i].name[0] == '\0') { // Find an empty entry
+            strncpy(entries[i].name, name, MAX_FILENAME_LEN -1);
+            entries[i].name[MAX_FILENAME_LEN - 1] = '\0'; // Ensure null termination
+            entries[i].fcb_index = free_fcb; // Link to the new FCB
+            
+            fcb->size += sizeof(directory_entry_t); // Update size of the directory
+            return 0; // Success
+        }
+    }
+    fprintf(stderr, "Root directory is full, cannot add new directory\n");
+    return -4; // Root directory is full
+}
+
+int fs_ls() {
+    fcb_t *root_fcb = &g_fcbs[g_superblock->root_dir_fcb_index];
+    uint32_t root_block = root_fcb->first_block_index;
+    directory_entry_t* entries = (directory_entry_t*)bm_get_block_address(root_block);
+    
+    printf("Contents of root directory:\n");
+    for(size_t i = 0; i < MAX_DIR_ENTRIES_PER_BLOCK; ++i) {
+        if (entries[i].fcb_index != 0 && entries[i].name[0] != '\0') {
+            fcb_t* fcb = &g_fcbs[entries[i].fcb_index];
+            const char* type = (fcb->type == FILE_TYPE_DIRECTORY) ? "Directory" : "File";
+            printf("Name: %s, Type: %s, Size: %u bytes\n", entries[i].name, type, fcb->size);
+        }
+    }
     return 0;
 }
 
